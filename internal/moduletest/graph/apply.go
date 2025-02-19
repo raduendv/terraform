@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/hashicorp/terraform/internal/addrs"
+	"github.com/hashicorp/terraform/internal/backend"
 	"github.com/hashicorp/terraform/internal/lang"
 	"github.com/hashicorp/terraform/internal/moduletest"
 	"github.com/hashicorp/terraform/internal/plans"
@@ -17,6 +18,7 @@ import (
 	"github.com/hashicorp/terraform/internal/tfdiags"
 )
 
+// testApply defines how to execute a run block representing an apply command
 func (n *NodeTestRun) testApply(ctx *EvalContext, variables terraform.InputValues, waiter *operationWaiter) {
 	file, run := n.File(), n.run
 	config := run.ModuleConfig
@@ -115,6 +117,39 @@ func (n *NodeTestRun) testApply(ctx *EvalContext, variables terraform.InputValue
 	// actually updated by this change. We want to use the run that
 	// most recently updated the tracked state as the cleanup
 	// configuration.
+	if state := ctx.GetFileState(key); state.backend.instance != nil {
+		if state.backend.run.Name == run.Name {
+			// There's a backend controlling the in-memory state
+			// _and_ we're processing the run block that contains the backend block.
+			// This run block is allowed to update the remote state.
+			b := state.backend.instance
+			stateMgr, err := b.StateMgr(backend.DefaultStateName) // TODO(SarahFrench) - allow use of other workspace names.
+			if err != nil {
+				run.Diagnostics.Append(tfdiags.Sourceless(
+					tfdiags.Error,
+					fmt.Sprintf("Error updating state in run block %q's backend", state.backend.run.Name),
+					err.Error(),
+				))
+			}
+
+			if stateMgr != nil {
+				err = stateMgr.WriteState(updated)
+				if err != nil {
+					run.Diagnostics.Append(tfdiags.Sourceless(
+						tfdiags.Error,
+						fmt.Sprintf("Error updating state in run block %q's backend", state.backend.run.Name),
+						err.Error(),
+					))
+				}
+			} else {
+				run.Diagnostics.Append(tfdiags.Sourceless(
+					tfdiags.Error,
+					fmt.Sprintf("Error updating state in run block %q's backend", state.backend.run.Name),
+					"Encountered a nil state manager. This is a bug in Terraform.",
+				))
+			}
+		}
+	}
 	ctx.SetFileState(key, &TestFileState{
 		Run:   run,
 		State: updated,

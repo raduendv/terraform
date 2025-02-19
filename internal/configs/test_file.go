@@ -66,6 +66,11 @@ type TestFile struct {
 	// order.
 	Runs []*TestRun
 
+	// BackendConfigs is a map of state keys to backend configuration.
+	// This should be used to set the state for a given state key at the start
+	// of a test command.
+	BackendConfigs map[string]*Backend
+
 	Config *TestFileConfig
 
 	VariablesDeclRange hcl.Range
@@ -329,19 +334,20 @@ type TestRunOptions struct {
 // runBlockBackend is used when parsing a single test file as part of ensuring
 // there is only a single backend block for a given internal state file.
 type runBlockBackend struct {
-	Backend *Backend
+	backend *Backend
 
 	// RunName is the name of the run block containing the backend block for this Backend
 	// This is usually used in diagnostics to help avoid duplicate backends for a given internal
 	// state file.
-	RunName string
+	runName string
 }
 
 func loadTestFile(body hcl.Body) (*TestFile, hcl.Diagnostics) {
 	var diags hcl.Diagnostics
 	tf := &TestFile{
-		Providers: make(map[string]*Provider),
-		Overrides: addrs.MakeMap[addrs.Targetable, *Override](),
+		Providers:      make(map[string]*Provider),
+		BackendConfigs: make(map[string]*Backend),
+		Overrides:      addrs.MakeMap[addrs.Targetable, *Override](),
 	}
 
 	// we need to retrieve the file config block first, because the run blocks
@@ -389,7 +395,7 @@ func loadTestFile(body hcl.Body) (*TestFile, hcl.Diagnostics) {
 				diags = append(diags, &hcl.Diagnostic{
 					Severity: hcl.DiagError,
 					Summary:  "Multiple backend blocks for internal state file",
-					Detail:   fmt.Sprintf("The run %q already uses an internal state file that's loaded by a backend in the run %q. Please ensure that a backend block is only in the first apply run block for a given internal state file.", run.Name, rb.RunName),
+					Detail:   fmt.Sprintf("The run %q already uses an internal state file that's loaded by a backend in the run %q. Please ensure that a backend block is only in the first apply run block for a given internal state file.", run.Name, rb.runName),
 					Subject:  block.DefRange.Ptr(),
 				})
 				continue
@@ -397,9 +403,10 @@ func loadTestFile(body hcl.Body) (*TestFile, hcl.Diagnostics) {
 			if run.Backend != nil {
 				// record newly-encountered backend blocks
 				stateKeyBackend[run.StateKey] = runBlockBackend{
-					Backend: run.Backend,
-					RunName: run.Name,
+					backend: run.Backend,
+					runName: run.Name,
 				}
+				tf.BackendConfigs[run.StateKey] = run.Backend
 			}
 		case "variables":
 			if tf.Variables != nil {

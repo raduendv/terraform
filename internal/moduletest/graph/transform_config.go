@@ -5,8 +5,11 @@ package graph
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/terraform/internal/backend"
 	"github.com/hashicorp/terraform/internal/configs"
 	"github.com/hashicorp/terraform/internal/dag"
 	"github.com/hashicorp/terraform/internal/moduletest"
@@ -25,12 +28,23 @@ type GraphNodeExecutable interface {
 type TestFileState struct {
 	Run   *moduletest.Run
 	State *states.State
+
+	backend runBackend
+}
+
+// runBackend connects the backend instance to the run that
+// contains it. This can be used to check whether a given run
+// should be able to update the remote state or not.
+type runBackend struct {
+	instance backend.Backend
+	run      *moduletest.Run
 }
 
 // TestConfigTransformer is a GraphTransformer that adds all the test runs,
 // and the variables defined in each run block, to the graph.
 type TestConfigTransformer struct {
-	File *moduletest.File
+	File           *moduletest.File
+	BackendFactory func(string) backend.InitFn
 }
 
 func (t *TestConfigTransformer) Transform(g *terraform.Graph) error {
@@ -48,10 +62,46 @@ func (t *TestConfigTransformer) Transform(g *terraform.Graph) error {
 		}
 		key := node.run.GetStateKey()
 		if _, exists := statesMap[key]; !exists {
-			state := &TestFileState{
-				Run:   nil,
-				State: states.NewState(),
+
+			var state *TestFileState
+
+			if bc, exists := t.File.Config.BackendConfigs[key]; exists {
+				// If the state for that state key should come from a backend,
+				// obtain and use that
+				if t.BackendFactory == nil {
+					return fmt.Errorf("nil BackendFactory")
+				}
+
+				f := t.BackendFactory(bc.Type)
+				if f == nil {
+					return fmt.Errorf("nil backend init function")
+				}
+				be, err := getBackendInstance(key, bc, f)
+				if err != nil {
+					return err
+				}
+
+				stmgr, err := be.StateMgr(backend.DefaultStateName) // TODO(SarahFrench) - allow use of other workspace names.
+				if err != nil {
+					return fmt.Errorf("error retrieving state for state key %q from backend: %w", key, err)
+				}
+
+				state = &TestFileState{
+					Run:   nil,
+					State: stmgr.State(),
+					backend: runBackend{
+						instance: be,
+						run:      node.run,
+					},
+				}
+			} else {
+				// Else, set an empty in-memory state for the state key
+				state = &TestFileState{
+					Run:   nil,
+					State: states.NewState(),
+				}
 			}
+
 			statesMap[key] = state
 		}
 
@@ -61,6 +111,38 @@ func (t *TestConfigTransformer) Transform(g *terraform.Graph) error {
 	}
 
 	return nil
+}
+
+// getBackendInstance uses the config for a given run block's backend block to create and return a configured
+// instance of that backend type.
+func getBackendInstance(stateKey string, config *configs.Backend, f backend.InitFn) (backend.Backend, error) {
+	b := f()
+	log.Printf("[TRACE] TestConfigTransformer.Transform: instantiated backend of type %T", b)
+
+	schema := b.ConfigSchema()
+	decSpec := schema.NoneRequired().DecoderSpec()
+	configVal, hclDiags := hcldec.Decode(config.Config, decSpec, nil)
+	if hclDiags.HasErrors() {
+		return nil, fmt.Errorf("error decoding backend configuration for state key %s : %v", stateKey, hclDiags.Errs())
+	}
+
+	if !configVal.IsWhollyKnown() {
+		return nil, fmt.Errorf("unknown values within backend definition for state key %s", stateKey)
+	}
+
+	newVal, validateDiags := b.PrepareConfig(configVal)
+	validateDiags = validateDiags.InConfigBody(config.Config, "")
+	if validateDiags.HasErrors() {
+		return nil, validateDiags.Err()
+	}
+
+	configureDiags := b.Configure(newVal)
+	configureDiags = configureDiags.InConfigBody(config.Config, "")
+	if validateDiags.HasErrors() {
+		return nil, configureDiags.Err()
+	}
+
+	return b, nil
 }
 
 func (t *TestConfigTransformer) addRootConfigNode(g *terraform.Graph, statesMap map[string]*TestFileState) *dynamicNode {

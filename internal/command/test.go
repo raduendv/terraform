@@ -9,7 +9,9 @@ import (
 	"strings"
 	"time"
 
+	backendInit "github.com/hashicorp/terraform/internal/backend/init"
 	"github.com/hashicorp/terraform/internal/backend/local"
+
 	"github.com/hashicorp/terraform/internal/cloud"
 	"github.com/hashicorp/terraform/internal/command/arguments"
 	"github.com/hashicorp/terraform/internal/command/jsonformat"
@@ -206,7 +208,8 @@ func (c *TestCommand) Run(rawArgs []string) int {
 		}
 	} else {
 		localRunner := &local.TestSuiteRunner{
-			Config: config,
+			BackendFactory: backendInit.Backend,
+			Config:         config,
 			// The GlobalVariables are loaded from the
 			// main configuration directory
 			// The GlobalTestVariables are loaded from the
