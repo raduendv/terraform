@@ -5,17 +5,15 @@ package local
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 
 	"github.com/hashicorp/terraform/internal/backend"
 	"github.com/hashicorp/terraform/internal/backend/backendrun"
+	localState "github.com/hashicorp/terraform/internal/backend/local-state"
 	"github.com/hashicorp/terraform/internal/command/views"
 	"github.com/hashicorp/terraform/internal/configs/configschema"
 	"github.com/hashicorp/terraform/internal/logging"
@@ -95,8 +93,11 @@ var _ backend.Backend = (*Local)(nil)
 var _ backendrun.OperationsBackend = (*Local)(nil)
 
 // New returns a new initialized local backend.
+// As no backend was supplied by the caller (used New instead of NewWithBackend)
+// an instance of the local state backend is provided as default.
 func New() *Local {
-	return NewWithBackend(nil)
+	backend := localState.New()
+	return NewWithBackend(backend)
 }
 
 // NewWithBackend returns a new local backend initialized with a
@@ -111,78 +112,21 @@ func (b *Local) ConfigSchema() *configschema.Block {
 	if b.Backend != nil {
 		return b.Backend.ConfigSchema()
 	}
-	return &configschema.Block{
-		Attributes: map[string]*configschema.Attribute{
-			"path": {
-				Type:     cty.String,
-				Optional: true,
-			},
-			"workspace_dir": {
-				Type:     cty.String,
-				Optional: true,
-			},
-		},
-	}
+	panic("no backend!")
 }
 
 func (b *Local) PrepareConfig(obj cty.Value) (cty.Value, tfdiags.Diagnostics) {
 	if b.Backend != nil {
 		return b.Backend.PrepareConfig(obj)
 	}
-
-	var diags tfdiags.Diagnostics
-
-	if val := obj.GetAttr("path"); !val.IsNull() {
-		p := val.AsString()
-		if p == "" {
-			diags = diags.Append(tfdiags.AttributeValue(
-				tfdiags.Error,
-				"Invalid local state file path",
-				`The "path" attribute value must not be empty.`,
-				cty.Path{cty.GetAttrStep{Name: "path"}},
-			))
-		}
-	}
-
-	if val := obj.GetAttr("workspace_dir"); !val.IsNull() {
-		p := val.AsString()
-		if p == "" {
-			diags = diags.Append(tfdiags.AttributeValue(
-				tfdiags.Error,
-				"Invalid local workspace directory path",
-				`The "workspace_dir" attribute value must not be empty.`,
-				cty.Path{cty.GetAttrStep{Name: "workspace_dir"}},
-			))
-		}
-	}
-
-	return obj, diags
+	panic("no backend!")
 }
 
 func (b *Local) Configure(obj cty.Value) tfdiags.Diagnostics {
 	if b.Backend != nil {
 		return b.Backend.Configure(obj)
 	}
-
-	var diags tfdiags.Diagnostics
-
-	if val := obj.GetAttr("path"); !val.IsNull() {
-		p := val.AsString()
-		b.StatePath = p
-		b.StateOutPath = p
-	} else {
-		b.StatePath = DefaultStateFilename
-		b.StateOutPath = DefaultStateFilename
-	}
-
-	if val := obj.GetAttr("workspace_dir"); !val.IsNull() {
-		p := val.AsString()
-		b.StateWorkspaceDir = p
-	} else {
-		b.StateWorkspaceDir = DefaultWorkspaceDir
-	}
-
-	return diags
+	panic("no backend!")
 }
 
 func (b *Local) ServiceDiscoveryAliases() ([]backendrun.HostAlias, error) {
@@ -194,30 +138,7 @@ func (b *Local) Workspaces() ([]string, error) {
 	if b.Backend != nil {
 		return b.Backend.Workspaces()
 	}
-
-	// the listing always start with "default"
-	envs := []string{backend.DefaultStateName}
-
-	entries, err := ioutil.ReadDir(b.stateWorkspaceDir())
-	// no error if there's no envs configured
-	if os.IsNotExist(err) {
-		return envs, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	var listed []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			listed = append(listed, filepath.Base(entry.Name()))
-		}
-	}
-
-	sort.Strings(listed)
-	envs = append(envs, listed...)
-
-	return envs, nil
+	panic("no backend!")
 }
 
 // DeleteWorkspace removes a workspace.
@@ -228,17 +149,7 @@ func (b *Local) DeleteWorkspace(name string, force bool) error {
 	if b.Backend != nil {
 		return b.Backend.DeleteWorkspace(name, force)
 	}
-
-	if name == "" {
-		return errors.New("empty state name")
-	}
-
-	if name == backend.DefaultStateName {
-		return errors.New("cannot delete default state")
-	}
-
-	delete(b.states, name)
-	return os.RemoveAll(filepath.Join(b.stateWorkspaceDir(), name))
+	panic("no backend!")
 }
 
 func (b *Local) StateMgr(name string) (statemgr.Full, error) {
@@ -246,28 +157,7 @@ func (b *Local) StateMgr(name string) (statemgr.Full, error) {
 	if b.Backend != nil {
 		return b.Backend.StateMgr(name)
 	}
-
-	if s, ok := b.states[name]; ok {
-		return s, nil
-	}
-
-	if err := b.createState(name); err != nil {
-		return nil, err
-	}
-
-	statePath, stateOutPath, backupPath := b.StatePaths(name)
-	log.Printf("[TRACE] backend/local: state manager for workspace %q will:\n - read initial snapshot from %s\n - write new snapshots to %s\n - create any backup at %s", name, statePath, stateOutPath, backupPath)
-
-	s := statemgr.NewFilesystemBetweenPaths(statePath, stateOutPath)
-	if backupPath != "" {
-		s.SetBackupPath(backupPath)
-	}
-
-	if b.states == nil {
-		b.states = map[string]statemgr.Full{}
-	}
-	b.states[name] = s
-	return s, nil
+	panic("no backend!")
 }
 
 // Operation implements backendrun.OperationsBackend
