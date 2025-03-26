@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/gohcl"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
+	"github.com/zclconf/go-cty/cty"
 
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/lang/langrefs"
@@ -104,6 +105,63 @@ func (r *Resource) HasCustomConditions() bool {
 	return len(r.Postconditions) != 0 || len(r.Preconditions) != 0
 }
 
+func traversalName(t hcl.Traverser) string {
+	switch t.(type) {
+	case hcl.TraverseRoot:
+		return t.(hcl.TraverseRoot).Name
+	case hcl.TraverseAttr:
+		return t.(hcl.TraverseAttr).Name
+	default:
+		return ""
+	}
+}
+
+func expandSplats(block *hcl.Block, exprs []hcl.Expression) []hcl.Expression {
+	out := make([]hcl.Expression, 0)
+
+	counter := map[string]int{}
+
+	// expand splats
+	for c := 0; c < len(exprs); c++ {
+		expr := exprs[c]
+		if splat, ok := expr.(*hclsyntax.SplatExpr); ok {
+			src, srcOk := splat.Source.(*hclsyntax.ScopeTraversalExpr)
+			dst, dstOk := splat.Each.(*hclsyntax.RelativeTraversalExpr)
+
+			if srcOk && dstOk {
+				for _, b := range block.Body.(*hclsyntax.Body).Blocks {
+					if b.Type == traversalName(src.Traversal[0]) {
+						counterKey := fmt.Sprintf("%s:%s", b.Type, traversalName(dst.Traversal[0]))
+						idx := counter[counterKey]
+
+						newExpr := &hclsyntax.ScopeTraversalExpr{
+							Traversal: []hcl.Traverser{
+								hcl.TraverseRoot{
+									Name: b.Type,
+								},
+								hcl.TraverseIndex{
+									Key: cty.NumberFloatVal(float64(idx)),
+								},
+								hcl.TraverseAttr{
+									Name: traversalName(dst.Traversal[0]),
+								},
+							},
+						}
+
+						counter[counterKey] += 1
+
+						out = append(out, newExpr)
+					}
+				}
+			}
+		} else {
+			out = append(out, expr)
+		}
+	}
+
+	return out
+}
+
 func decodeResourceBlock(block *hcl.Block, override bool) (*Resource, hcl.Diagnostics) {
 	var diags hcl.Diagnostics
 	r := &Resource{
@@ -114,6 +172,8 @@ func decodeResourceBlock(block *hcl.Block, override bool) (*Resource, hcl.Diagno
 		TypeRange: block.LabelRanges[0],
 		Managed:   &ManagedResource{},
 	}
+
+	mainBlock := block
 
 	content, remain, moreDiags := block.Body.PartialContent(ResourceBlockSchema)
 	diags = append(diags, moreDiags...)
@@ -226,6 +286,8 @@ func decodeResourceBlock(block *hcl.Block, override bool) (*Resource, hcl.Diagno
 					diags = append(diags, listDiags...)
 
 					var ignoreAllRange hcl.Range
+
+					exprs = expandSplats(mainBlock, exprs)
 
 					for _, expr := range exprs {
 
