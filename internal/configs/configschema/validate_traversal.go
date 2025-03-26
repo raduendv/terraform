@@ -149,40 +149,11 @@ func (b *NestedBlock) staticValidateTraversal(typeName string, traversal hcl.Tra
 	}
 
 	var diags tfdiags.Diagnostics
-	next := traversal[0]
 	after := traversal[1:]
 
 	switch b.Nesting {
 
-	case NestingSet:
-		// Can't traverse into a set at all, since it does not have any keys
-		// to index with.
-		diags = diags.Append(&hcl.Diagnostic{
-			Severity: hcl.DiagError,
-			Summary:  `Cannot index a set value`,
-			Detail:   fmt.Sprintf(`Block type %q is represented by a set of objects, and set elements do not have addressable keys. To find elements matching specific criteria, use a "for" expression with an "if" clause.`, typeName),
-			Subject:  next.SourceRange().Ptr(),
-		})
-		return diags
-
-	case NestingList:
-		if _, ok := next.(hcl.TraverseIndex); ok {
-			moreDiags := b.Block.StaticValidateTraversal(after)
-			diags = diags.Append(moreDiags)
-		} else {
-			diags = diags.Append(&hcl.Diagnostic{
-				Severity: hcl.DiagError,
-				Summary:  `Invalid operation`,
-				Detail:   fmt.Sprintf(`Block type %q is represented by a list of objects, so it must be indexed using a numeric key, like .%s[0].`, typeName, typeName),
-				Subject:  next.SourceRange().Ptr(),
-			})
-		}
-		return diags
-
-	case NestingMap:
-		// Both attribute and index steps are valid for maps, so we'll just
-		// pass through here and let normal evaluation catch an
-		// incorrectly-typed index key later, if present.
+	case NestingSet, NestingList, NestingMap:
 		moreDiags := b.Block.StaticValidateTraversal(after)
 		diags = diags.Append(moreDiags)
 		return diags

@@ -1422,6 +1422,43 @@ func traversalToPath(traversal hcl.Traversal) (cty.Path, string) {
 	return path, key.String()
 }
 
+func fixPathsForTypeSet(config cty.Value, paths []cty.Path) []cty.Path {
+	var out []cty.Path
+
+	for _, path := range paths {
+		current := config
+		newPath := make(cty.Path, 0, len(path))
+
+		for _, part := range path {
+			newCurrent, err := part.Apply(current)
+			newPart := part
+
+			if err != nil {
+				if step, ok := part.(cty.IndexStep); ok && step.Key.Type() == cty.Number && current.Type().IsSetType() {
+					idx, _ := step.Key.AsBigFloat().Int64()
+					if idx < int64(len(current.AsValueSlice())) {
+						newCurrent = current.AsValueSlice()[idx]
+						err = nil
+					}
+
+					if newCurrent.Type().IsMapType() || newCurrent.Type().IsObjectType() {
+						newPart = cty.IndexStep{
+							Key: cty.ObjectVal(newCurrent.AsValueMap()),
+						}
+					}
+				}
+			}
+
+			newPath = append(newPath, newPart)
+			current = newCurrent
+		}
+
+		out = append(out, newPath)
+	}
+
+	return out
+}
+
 func processIgnoreChangesIndividual(prior, config cty.Value, ignoreChangesPath []cty.Path) (cty.Value, tfdiags.Diagnostics) {
 	type ignoreChange struct {
 		// Path is the full path, minus any trailing map index
@@ -1434,6 +1471,8 @@ func processIgnoreChangesIndividual(prior, config cty.Value, ignoreChangesPath [
 		key cty.Value
 	}
 	var ignoredValues []ignoreChange
+
+	ignoreChangesPath = fixPathsForTypeSet(config, ignoreChangesPath)
 
 	// Find the actual changes first and store them in the ignoreChange struct.
 	// If the change was to a map value, and the key doesn't exist in the
@@ -1450,17 +1489,63 @@ func processIgnoreChangesIndividual(prior, config cty.Value, ignoreChangesPath [
 			}
 		}
 
-		// The structure should have been validated already, and we already
-		// trimmed the trailing map index. Any other intermediate index error
-		// means we wouldn't be able to apply the value below, so no need to
-		// record this.
-		p, err := icPath.Apply(prior)
-		if err != nil {
-			continue
-		}
-		c, err := icPath.Apply(config)
-		if err != nil {
-			continue
+		var p cty.Value = prior
+		var c cty.Value = config
+		var err error
+
+		// special case for ingoring inside sets
+		if len(icPath) > 1 {
+			for _, icSubPath := range icPath {
+				if attr, ok := icSubPath.(cty.IndexStep); ok && p.Type().IsSetType() && c.Type().IsSetType() {
+					tmpP := p.AsValueSlice()
+					tmpC := c.AsValueSlice()
+					for idx, _ := range tmpP {
+						if attr.Key.RawEquals(tmpP[idx]) || attr.Key.RawEquals(tmpC[idx]) {
+							p = tmpP[idx]
+							c = tmpC[idx]
+							break
+						}
+					}
+					continue
+				}
+
+				if attr, ok := icSubPath.(cty.GetAttrStep); ok && p.Type().IsObjectType() && c.Type().IsObjectType() {
+					k := attr.Name
+					var pOk bool
+					var cOk bool
+					p, pOk = p.AsValueMap()[k]
+					c, cOk = c.AsValueMap()[k]
+					if pOk && cOk {
+						continue
+					}
+				}
+
+				p, err = icSubPath.Apply(p)
+				if err != nil {
+					break
+				}
+				c, err = icSubPath.Apply(c)
+				if err != nil {
+					break
+				}
+			}
+
+			if err != nil {
+				continue
+			}
+		} else {
+			// The structure should have been validated already, and we already
+			// trimmed the trailing map index. Any other intermediate index error
+			// means we wouldn't be able to apply the value below, so no need to
+			// record this.
+			p, err = icPath.Apply(prior)
+			if err != nil {
+				continue
+			}
+			c, err = icPath.Apply(config)
+			if err != nil {
+				continue
+			}
 		}
 
 		// If this is a map, it is checking the entire map value for equality
@@ -1481,7 +1566,7 @@ func processIgnoreChangesIndividual(prior, config cty.Value, ignoreChangesPath [
 	ret, _ := cty.Transform(config, func(path cty.Path, v cty.Value) (cty.Value, error) {
 		// Easy path for when we are only matching the entire value. The only
 		// values we break up for inspection are maps.
-		if !v.Type().IsMapType() {
+		if !v.Type().IsMapType() || ((v.Type() == cty.String || v.Type() == cty.Number) && len(path) > 1) {
 			for _, ignored := range ignoredValues {
 				if path.Equals(ignored.path) {
 					return ignored.value, nil
@@ -1504,9 +1589,13 @@ func processIgnoreChangesIndividual(prior, config cty.Value, ignoreChangesPath [
 		// The configMap is the current configuration value, which we will
 		// mutate based on the ignored paths and the prior map value.
 		var configMap map[string]cty.Value
+		var configSet []cty.Value
+
 		switch {
 		case v.IsNull() || v.LengthInt() == 0:
 			configMap = map[string]cty.Value{}
+		case v.Type().IsSetType():
+			configSet = v.AsValueSlice()
 		default:
 			configMap = v.AsValueMap()
 		}
@@ -1540,7 +1629,9 @@ func processIgnoreChangesIndividual(prior, config cty.Value, ignoreChangesPath [
 			case ignored.value.IsNull() || ignoredVal.LengthInt() == 0:
 				priorMap = map[string]cty.Value{}
 			default:
-				priorMap = ignoredVal.AsValueMap()
+				if !ignoredVal.Type().IsSetType() {
+					priorMap = ignoredVal.AsValueMap()
+				}
 			}
 
 			key := ignored.key.AsString()
@@ -1558,6 +1649,8 @@ func processIgnoreChangesIndividual(prior, config cty.Value, ignoreChangesPath [
 
 		var newVal cty.Value
 		switch {
+		case len(configSet) > 0:
+			newVal = cty.SetVal(configSet)
 		case len(configMap) > 0:
 			newVal = cty.MapVal(configMap)
 		case v.IsNull():
@@ -1565,7 +1658,11 @@ func processIgnoreChangesIndividual(prior, config cty.Value, ignoreChangesPath [
 			// reset the value to null.
 			newVal = v
 		default:
-			newVal = cty.MapValEmpty(v.Type().ElementType())
+			if v.Type().IsSetType() {
+				newVal = cty.SetValEmpty(v.Type().ElementType())
+			} else {
+				newVal = cty.MapValEmpty(v.Type().ElementType())
+			}
 		}
 
 		if len(vMarks) > 0 {
