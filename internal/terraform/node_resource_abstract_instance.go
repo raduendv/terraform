@@ -6,6 +6,7 @@ package terraform
 import (
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
@@ -1499,10 +1500,58 @@ func processIgnoreChangesIndividual(prior, config cty.Value, ignoreChangesPath [
 				if attr, ok := icSubPath.(cty.IndexStep); ok && p.Type().IsSetType() && c.Type().IsSetType() {
 					tmpP := p.AsValueSlice()
 					tmpC := c.AsValueSlice()
-					for idx, _ := range tmpP {
-						if attr.Key.RawEquals(tmpP[idx]) || attr.Key.RawEquals(tmpC[idx]) {
-							p = tmpP[idx]
-							c = tmpC[idx]
+
+					if attr.Key.Type().IsObjectType() {
+						km := attr.Key.AsValueMap()
+						bestMatchP := -1
+						bestMatchC := -1
+						// maybe we want to give more weight to some keys when they match
+						highMatches := []string{"name"}
+						highMatchValue := len(km)
+
+						for ip := range tmpP {
+							pm := tmpP[ip].AsValueMap()
+							prevMatch := 0
+
+							for ic := range tmpC {
+								match := 0
+								cm := tmpC[ic].AsValueMap()
+
+								for k, _ := range km {
+									vp := pm[k]
+									vc := cm[k]
+
+									if vp.RawEquals(vc) {
+										if slices.Contains(highMatches, k) {
+											match += highMatchValue
+										} else {
+											match++
+										}
+									}
+								}
+
+								// match must be over previous match and pass a minimum match threshold
+								if match > prevMatch && match > (len(km)/2)+1 {
+									prevMatch = match
+									bestMatchP = ip
+									bestMatchC = ic
+								}
+							}
+						}
+
+						if bestMatchC != -1 {
+							c = tmpC[bestMatchC]
+						}
+						if bestMatchP != -1 {
+							p = tmpP[bestMatchP]
+						}
+						continue
+					}
+
+					for idx := range max(len(tmpP), len(tmpC)) {
+						if attr.Key.RawEquals(tmpP[min(idx, len(tmpP)-1)]) || attr.Key.RawEquals(tmpC[min(idx, len(tmpC)-1)]) {
+							p = tmpP[min(idx, len(tmpP)-1)]
+							c = tmpC[min(idx, len(tmpC)-1)]
 							break
 						}
 					}
